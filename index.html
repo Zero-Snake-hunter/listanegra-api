@@ -243,32 +243,20 @@ function extractNum(oficio){
   var m=oficio.match(/-(\d{4,6})(?:\s|$)/);
   return m?m[1]:null;
 }
-function abrirOficio(num,btn){
-  // Intentar patrones conocidos directamente — el navegador abre el que existe
-  var BASE="http://omawww.sat.gob.mx/informacionfiscal/Documents/";
-  var patrones=[
-    BASE+"O_"+num+".pdf",
-    BASE+"Oficio_"+num+".pdf",
-    BASE+num+"_OSFM.pdf",
-    BASE+num+"_ODCS.pdf",
-    BASE+num+"_ODCE.pdf",
-    BASE+num+"_ADCE.pdf",
-    BASE+num+"_OPE.pdf",
-    BASE+num+"_ADCA.pdf",
-    BASE+num+"_ADSM.pdf",
-    BASE+num+"_OPD.pdf",
-    BASE+num+".pdf"
-  ];
-  // Abrir el primero — si no existe el SAT muestra error, el usuario prueba el siguiente
-  // Usamos el Worker solo para el orden correcto
-  fetch(CONTADOR_API+"/oficio/"+num,{signal:AbortSignal.timeout(3000)})
-    .then(function(r){return r.json();})
-    .then(function(d){window.open(d.url,"_blank","noopener");})
-    .catch(function(){
-      // Fallback: abrir directo con patrón más común
-      window.open(BASE+"O_"+num+".pdf","_blank","noopener");
-    });
+async function abrirOficio(num,btn){
+  var ldate=btn?btn.getAttribute("data-date"):"";
+  if(btn){btn.innerHTML="&#9203; Buscando...";btn.disabled=true;}
+  try{
+    var r=await fetch(LISTANEGRA_API+"/oficio/"+num);
+    var d=await r.json();
+    if(btn){btn.disabled=false;btn.innerHTML="&#128196; Oficio PDF<span class='ldate'>"+ldate+"</span>";}
+    window.open(d.url,"_blank","noopener");
+  }catch(e){
+    if(btn){btn.disabled=false;btn.innerHTML="&#128196; Oficio PDF<span class='ldate'>"+ldate+"</span>";}
+    window.open("http://omawww.sat.gob.mx/informacionfiscal/Documents/O_"+num+".pdf","_blank","noopener");
+  }
 }
+
 function stageBlock(cls,emoji,label,oficio,pubSAT,pubDOF){
   var hasAny=!!(oficio||pubSAT||pubDOF);
   var dofLink=dofUrl(pubDOF);
