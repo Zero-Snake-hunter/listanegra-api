@@ -9,7 +9,7 @@ app = FastAPI(title="Lista Negra 69-B API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"])
 
 MONGO_URI = os.environ.get("MONGO_URI", "")
-SAT_URL = "https://wu1agsprosta001.blob.core.windows.net/agsc-publicaciones/Datos_abiertos/Documents_AGAFF/Listado_completo_69-B.csv"
+SAT_CSV = "https://wu1agsprosta001.blob.core.windows.net/agsc-publicaciones/Datos_abiertos/Documents_AGAFF/Listado_completo_69-B.csv"
 SAT_PAGE = "https://www.gob.mx/sat/acciones-y-programas/notificacion-a-contribuyentes-con-operaciones-presuntamente-inexistentes-y-listados-definitivos-333336"
 BASE_PDF = "http://omawww.sat.gob.mx/informacionfiscal/Documents/"
 
@@ -20,7 +20,7 @@ async def actualizar_listado():
     print(f"[{datetime.now()}] Descargando listado SAT...")
     try:
         async with httpx.AsyncClient(timeout=120) as h:
-            r = await h.get(SAT_URL, headers={"User-Agent": "Mozilla/5.0"})
+            r = await h.get(SAT_CSV, headers={"User-Agent": "Mozilla/5.0"})
         df = pd.read_csv(io.StringIO(r.content.decode("latin-1")), header=2)
         df = df.iloc[1:]
         df.columns = [
@@ -95,23 +95,54 @@ async def buscar(rfc: str):
 
 @app.get("/oficio/{num}")
 async def resolver_oficio(num: str):
-    """Resuelve la URL correcta del PDF del oficio SAT"""
+    """Resuelve la URL del PDF del oficio SAT probando todos los patrones conocidos"""
     if not num.isdigit():
         return {"url": SAT_PAGE, "fallback": True}
+
+    # Lista completa de patrones extraídos de la página oficial del SAT
     patrones = [
-        f"O_{num}.pdf", f"Oficio_{num}.pdf",
-        f"{num}_OSFM.pdf", f"{num}_ODCS.pdf", f"{num}_ODCE.pdf",
-        f"{num}_ADCE.pdf", f"{num}_OPE.pdf", f"{num}_OPD.pdf",
-        f"{num}_ADCA.pdf", f"{num}_ADCA_1.pdf", f"{num}_ADSM.pdf",
-        f"{num}_ADCD.pdf", f"{num}_ADVM.pdf", f"{num}_ODVM.pdf",
-        f"{num}_ADVS.pdf", f"{num}_OPC.pdf", f"{num}.pdf",
+        # Prefijos clásicos
+        f"O_{num}.pdf",
+        f"Oficio_{num}.pdf",
+        f"oficio_{num}.pdf",
+        # Presunción
+        f"{num}_OPE.pdf", f"{num}_OPF.pdf", f"{num}_OPM.pdf",
+        f"{num}_OPA.pdf", f"{num}_OPJ.pdf", f"{num}_OPS.pdf",
+        f"{num}_OPO.pdf", f"{num}_OPN.pdf", f"{num}_OPD.pdf",
+        f"{num}_OPJ_SIFEN.pdf",
+        # Definitivos - DS (sin pruebas)
+        f"{num}_ODSE.pdf", f"{num}_ODSF.pdf", f"{num}_ODSM.pdf",
+        f"{num}_ODSA.pdf", f"{num}_ODSJ.pdf", f"{num}_ODSS.pdf",
+        f"{num}_ODSO.pdf", f"{num}_ODSN.pdf", f"{num}_ODSD.pdf",
+        # Definitivos - DC (con pruebas)
+        f"{num}_ODCE.pdf", f"{num}_ODCF.pdf", f"{num}_ODCM.pdf",
+        f"{num}_ODCA.pdf", f"{num}_ODCJ.pdf", f"{num}_ODCS.pdf",
+        f"{num}_ODCO.pdf", f"{num}_ODCN.pdf", f"{num}_ODCD.pdf",
+        # Definitivos - otros
+        f"{num}_ODVA.pdf", f"{num}_ODVD.pdf", f"{num}_ODVE.pdf",
+        f"{num}_ODVF.pdf", f"{num}_ODVJ.pdf", f"{num}_ODVM.pdf",
+        f"{num}_ODVN.pdf", f"{num}_ODVS.pdf", f"{num}_ODVO.pdf",
+        # Desvirtuados
+        f"{num}_ADVD.pdf", f"{num}_ADVF.pdf", f"{num}_ADVJ.pdf",
+        f"{num}_ADVM.pdf", f"{num}_ADVN.pdf", f"{num}_ADVO.pdf",
+        f"{num}_ADVS.pdf",
+        # Sentencia favorable
+        f"{num}_OSFM.pdf", f"{num}_OSFJ.pdf", f"{num}_OSFA.pdf",
+        f"{num}_LSFE.pdf", f"{num}_LSFF.pdf", f"{num}_LSFM.pdf",
+        f"{num}_LSFN.pdf", f"{num}_LSFA.pdf", f"{num}_LSFD.pdf",
+        f"{num}_LSFJ.pdf", f"{num}_LSFS.pdf", f"{num}_LSF.pdf",
+        f"{num}_LMDA.pdf", f"{num}_LMDE.pdf", f"{num}_LMDF.pdf",
+        f"{num}_LMDJ.pdf", f"{num}_LMDM.pdf", f"{num}_LMDN.pdf",
+        # Sin sufijo
+        f"{num}.pdf",
     ]
-    async with httpx.AsyncClient(timeout=10) as client:
-        tasks = []
-        for p in patrones:
-            tasks.append(client.head(BASE_PDF + p))
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        tasks = [client.head(BASE_PDF + p) for p in patrones]
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
     for i, r in enumerate(results):
         if not isinstance(r, Exception) and r.status_code in (200, 302):
             return {"url": BASE_PDF + patrones[i]}
+
     return {"url": SAT_PAGE, "fallback": True}
