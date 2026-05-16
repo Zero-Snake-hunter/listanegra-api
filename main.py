@@ -137,12 +137,19 @@ async def resolver_oficio(num: str):
         f"{num}.pdf",
     ]
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        tasks = [client.head(BASE_PDF + p) for p in patrones]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-MX,es;q=0.9",
+        "Referer": "https://www.gob.mx/sat/",
+    }
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+        tasks = [client.head(BASE_PDF + p, headers=headers) for p in patrones]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for i, r in enumerate(results):
-        if not isinstance(r, Exception) and r.status_code in (200, 302):
+        if not isinstance(r, Exception) and r.status_code in (200, 301, 302, 303, 307, 308):
             return {"url": BASE_PDF + patrones[i]}
 
     return {"url": SAT_PAGE, "fallback": True}
+
