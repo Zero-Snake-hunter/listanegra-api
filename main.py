@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from motor.motor_asyncio import AsyncIOMotorClient
+from bs4 import BeautifulSoup
 import httpx, pandas as pd, io, os, asyncio, re
 from datetime import datetime
 
@@ -16,13 +17,14 @@ BASE_PDF = "http://omawww.sat.gob.mx/informacionfiscal/Documents/"
 client = AsyncIOMotorClient(MONGO_URI)
 db = client["listanegra"]
 
-# Mapa en memoria: número de oficio → nombre de archivo PDF
-oficios_map: dict = {}
+# Mapas en memoria: número de oficio → nombre de archivo PDF
+oficios_map: dict = {}   # num → oficio.pdf
+anexos_map: dict = {}    # num → anexo.pdf
 
 async def actualizar_mapa_oficios():
-    """Descarga la página del SAT y extrae todos los links de PDFs de oficios"""
-    global oficios_map
-    print(f"[{datetime.now()}] Actualizando mapa de oficios...")
+    """Descarga la página del SAT y extrae todos los links de oficios y anexos"""
+    global oficios_map, anexos_map
+    print(f"[{datetime.now()}] Actualizando mapa de oficios y anexos...")
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -31,25 +33,42 @@ async def actualizar_mapa_oficios():
         }
         async with httpx.AsyncClient(timeout=30) as h:
             r = await h.get(SAT_PAGE, headers=headers)
-        
-        # Extraer todos los links a PDFs en omawww.sat.gob.mx
-        urls = re.findall(
-            r'href=["\'](?:http://omawww\.sat\.gob\.mx/(?:informacionfiscal|cifras_sat|documentossat)/Documents/([^"\']+\.pdf))["\']',
-            r.text, re.IGNORECASE
-        )
-        
-        nuevo_mapa = {}
-        for fname in urls:
-            # Extraer número del oficio del nombre del archivo
-            m = re.search(r'(?:^|[_/])(\d{4,6})(?:[_.]|$)', fname)
-            if m:
-                num = m.group(1)
-                if num not in nuevo_mapa:
-                    nuevo_mapa[num] = fname
 
-        if nuevo_mapa:
-            oficios_map = nuevo_mapa
-            print(f"[{datetime.now()}] Mapa actualizado: {len(oficios_map)} oficios")
+        soup = BeautifulSoup(r.text, "html.parser")
+        PDF_RE = re.compile(
+            r"omawww\.sat\.gob\.mx/(?:informacionfiscal|documentossat|cifras_sat)/Documents/([^\s\"'><]+\.pdf)",
+            re.IGNORECASE
+        )
+        NUM_RE = re.compile(r"(?:^|[_/])(\d{4,6})(?:[_.]|$)")
+
+        nuevo_oficios = {}
+        nuevo_anexos = {}
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            text = a.get_text(strip=True).lower()
+
+            m = PDF_RE.search(href)
+            if not m:
+                continue
+            fname = m.group(1)
+
+            nm = NUM_RE.search(fname)
+            if not nm:
+                continue
+            num = nm.group(1)
+
+            if "oficio" in text:
+                if num not in nuevo_oficios:
+                    nuevo_oficios[num] = fname
+            elif "anexo" in text:
+                if num not in nuevo_anexos:
+                    nuevo_anexos[num] = fname
+
+        if nuevo_oficios:
+            oficios_map = nuevo_oficios
+            anexos_map = nuevo_anexos
+            print(f"[{datetime.now()}] Mapa actualizado: {len(oficios_map)} oficios, {len(anexos_map)} anexos")
         else:
             print(f"[{datetime.now()}] ADVERTENCIA: mapa vacío, manteniendo anterior")
 
@@ -88,7 +107,6 @@ async def actualizar_listado():
 
 @app.on_event("startup")
 async def startup():
-    # Cargar mapa de oficios al arrancar
     await actualizar_mapa_oficios()
 
     if not MONGO_URI:
@@ -96,9 +114,7 @@ async def startup():
         return
 
     scheduler = AsyncIOScheduler()
-    # CSV cada lunes a las 2am
     scheduler.add_job(actualizar_listado, "cron", day_of_week="mon", hour=2)
-    # Mapa de oficios cada lunes a las 3am (después del CSV)
     scheduler.add_job(actualizar_mapa_oficios, "cron", day_of_week="mon", hour=3)
     scheduler.start()
 
@@ -116,7 +132,8 @@ async def root():
         "app": "Lista Negra 69-B API",
         "total": total,
         "updated_at": meta["updated_at"] if meta else None,
-        "oficios_mapeados": len(oficios_map)
+        "oficios_mapeados": len(oficios_map),
+        "anexos_mapeados": len(anexos_map)
     }
 
 @app.get("/status")
@@ -126,7 +143,8 @@ async def status():
     return {
         "total": total,
         "updated_at": meta["updated_at"] if meta else None,
-        "oficios_mapeados": len(oficios_map)
+        "oficios_mapeados": len(oficios_map),
+        "anexos_mapeados": len(anexos_map)
     }
 
 @app.get("/buscar/{rfc}")
@@ -152,18 +170,24 @@ async def buscar(rfc: str):
 
 @app.get("/oficio/{num}")
 async def resolver_oficio(num: str):
-    """Resuelve URL del PDF usando el mapa extraído de la página del SAT"""
+    """Devuelve la URL del oficio PDF y del Anexo cuando está disponible"""
     if not num.isdigit():
         return {"url": SAT_PAGE, "fallback": True}
 
-    fname = oficios_map.get(num)
-    if fname:
-        return {"url": BASE_PDF + fname}
+    oficio_fname = oficios_map.get(num)
+    anexo_fname = anexos_map.get(num)
 
-    return {"url": SAT_PAGE, "fallback": True}
+    if oficio_fname:
+        return {
+            "url": BASE_PDF + oficio_fname,
+            "anexo_url": BASE_PDF + anexo_fname if anexo_fname else None,
+            "fallback": False
+        }
+
+    return {"url": SAT_PAGE, "anexo_url": None, "fallback": True}
 
 @app.get("/actualizar-oficios")
 async def forzar_actualizacion_oficios():
-    """Fuerza actualización del mapa de oficios desde la página del SAT"""
+    """Fuerza actualización del mapa desde la página del SAT"""
     await actualizar_mapa_oficios()
-    return {"ok": True, "oficios_mapeados": len(oficios_map)}
+    return {"ok": True, "oficios_mapeados": len(oficios_map), "anexos_mapeados": len(anexos_map)}
