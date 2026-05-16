@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from motor.motor_asyncio import AsyncIOMotorClient
-import httpx, pandas as pd, io, os, asyncio
+import httpx, pandas as pd, io, os, asyncio, re
 from datetime import datetime
 
 app = FastAPI(title="Lista Negra 69-B API")
@@ -15,6 +15,46 @@ BASE_PDF = "http://omawww.sat.gob.mx/informacionfiscal/Documents/"
 
 client = AsyncIOMotorClient(MONGO_URI)
 db = client["listanegra"]
+
+# Mapa en memoria: número de oficio → nombre de archivo PDF
+oficios_map: dict = {}
+
+async def actualizar_mapa_oficios():
+    """Descarga la página del SAT y extrae todos los links de PDFs de oficios"""
+    global oficios_map
+    print(f"[{datetime.now()}] Actualizando mapa de oficios...")
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "es-MX,es;q=0.9",
+        }
+        async with httpx.AsyncClient(timeout=30) as h:
+            r = await h.get(SAT_PAGE, headers=headers)
+        
+        # Extraer todos los links a PDFs en omawww.sat.gob.mx
+        urls = re.findall(
+            r'href=["\'](?:http://omawww\.sat\.gob\.mx/(?:informacionfiscal|cifras_sat|documentossat)/Documents/([^"\']+\.pdf))["\']',
+            r.text, re.IGNORECASE
+        )
+        
+        nuevo_mapa = {}
+        for fname in urls:
+            # Extraer número del oficio del nombre del archivo
+            m = re.search(r'(?:^|[_/])(\d{4,6})(?:[_.]|$)', fname)
+            if m:
+                num = m.group(1)
+                if num not in nuevo_mapa:
+                    nuevo_mapa[num] = fname
+
+        if nuevo_mapa:
+            oficios_map = nuevo_mapa
+            print(f"[{datetime.now()}] Mapa actualizado: {len(oficios_map)} oficios")
+        else:
+            print(f"[{datetime.now()}] ADVERTENCIA: mapa vacío, manteniendo anterior")
+
+    except Exception as e:
+        print(f"[{datetime.now()}] Error actualizando mapa: {e}")
 
 async def actualizar_listado():
     print(f"[{datetime.now()}] Descargando listado SAT...")
@@ -42,18 +82,26 @@ async def actualizar_listado():
             {"_id": "info", "total": total, "updated_at": datetime.now().isoformat()},
             upsert=True
         )
-        print(f"[{datetime.now()}] Actualizado: {total} registros")
+        print(f"[{datetime.now()}] Listado actualizado: {total} registros")
     except Exception as e:
-        print(f"[{datetime.now()}] Error: {e}")
+        print(f"[{datetime.now()}] Error actualizando listado: {e}")
 
 @app.on_event("startup")
 async def startup():
+    # Cargar mapa de oficios al arrancar
+    await actualizar_mapa_oficios()
+
     if not MONGO_URI:
         print("ADVERTENCIA: MONGO_URI no configurado")
         return
+
     scheduler = AsyncIOScheduler()
+    # CSV cada lunes a las 2am
     scheduler.add_job(actualizar_listado, "cron", day_of_week="mon", hour=2)
+    # Mapa de oficios cada lunes a las 3am (después del CSV)
+    scheduler.add_job(actualizar_mapa_oficios, "cron", day_of_week="mon", hour=3)
     scheduler.start()
+
     total = await db["contribuyentes"].count_documents({})
     if total == 0:
         await actualizar_listado()
@@ -64,13 +112,22 @@ async def startup():
 async def root():
     meta = await db["meta"].find_one({"_id": "info"})
     total = await db["contribuyentes"].count_documents({})
-    return {"app": "Lista Negra 69-B API", "total": total, "updated_at": meta["updated_at"] if meta else None}
+    return {
+        "app": "Lista Negra 69-B API",
+        "total": total,
+        "updated_at": meta["updated_at"] if meta else None,
+        "oficios_mapeados": len(oficios_map)
+    }
 
 @app.get("/status")
 async def status():
     total = await db["contribuyentes"].count_documents({})
     meta = await db["meta"].find_one({"_id": "info"})
-    return {"total": total, "updated_at": meta["updated_at"] if meta else None}
+    return {
+        "total": total,
+        "updated_at": meta["updated_at"] if meta else None,
+        "oficios_mapeados": len(oficios_map)
+    }
 
 @app.get("/buscar/{rfc}")
 async def buscar(rfc: str):
@@ -95,61 +152,18 @@ async def buscar(rfc: str):
 
 @app.get("/oficio/{num}")
 async def resolver_oficio(num: str):
-    """Resuelve la URL del PDF del oficio SAT probando todos los patrones conocidos"""
+    """Resuelve URL del PDF usando el mapa extraído de la página del SAT"""
     if not num.isdigit():
         return {"url": SAT_PAGE, "fallback": True}
 
-    # Lista completa de patrones extraídos de la página oficial del SAT
-    patrones = [
-        # Prefijos clásicos
-        f"O_{num}.pdf",
-        f"Oficio_{num}.pdf",
-        f"oficio_{num}.pdf",
-        # Presunción
-        f"{num}_OPE.pdf", f"{num}_OPF.pdf", f"{num}_OPM.pdf",
-        f"{num}_OPA.pdf", f"{num}_OPJ.pdf", f"{num}_OPS.pdf",
-        f"{num}_OPO.pdf", f"{num}_OPN.pdf", f"{num}_OPD.pdf",
-        f"{num}_OPJ_SIFEN.pdf",
-        # Definitivos - DS (sin pruebas)
-        f"{num}_ODSE.pdf", f"{num}_ODSF.pdf", f"{num}_ODSM.pdf",
-        f"{num}_ODSA.pdf", f"{num}_ODSJ.pdf", f"{num}_ODSS.pdf",
-        f"{num}_ODSO.pdf", f"{num}_ODSN.pdf", f"{num}_ODSD.pdf",
-        # Definitivos - DC (con pruebas)
-        f"{num}_ODCE.pdf", f"{num}_ODCF.pdf", f"{num}_ODCM.pdf",
-        f"{num}_ODCA.pdf", f"{num}_ODCJ.pdf", f"{num}_ODCS.pdf",
-        f"{num}_ODCO.pdf", f"{num}_ODCN.pdf", f"{num}_ODCD.pdf",
-        # Definitivos - otros
-        f"{num}_ODVA.pdf", f"{num}_ODVD.pdf", f"{num}_ODVE.pdf",
-        f"{num}_ODVF.pdf", f"{num}_ODVJ.pdf", f"{num}_ODVM.pdf",
-        f"{num}_ODVN.pdf", f"{num}_ODVS.pdf", f"{num}_ODVO.pdf",
-        # Desvirtuados
-        f"{num}_ADVD.pdf", f"{num}_ADVF.pdf", f"{num}_ADVJ.pdf",
-        f"{num}_ADVM.pdf", f"{num}_ADVN.pdf", f"{num}_ADVO.pdf",
-        f"{num}_ADVS.pdf",
-        # Sentencia favorable
-        f"{num}_OSFM.pdf", f"{num}_OSFJ.pdf", f"{num}_OSFA.pdf",
-        f"{num}_LSFE.pdf", f"{num}_LSFF.pdf", f"{num}_LSFM.pdf",
-        f"{num}_LSFN.pdf", f"{num}_LSFA.pdf", f"{num}_LSFD.pdf",
-        f"{num}_LSFJ.pdf", f"{num}_LSFS.pdf", f"{num}_LSF.pdf",
-        f"{num}_LMDA.pdf", f"{num}_LMDE.pdf", f"{num}_LMDF.pdf",
-        f"{num}_LMDJ.pdf", f"{num}_LMDM.pdf", f"{num}_LMDN.pdf",
-        # Sin sufijo
-        f"{num}.pdf",
-    ]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-MX,es;q=0.9",
-        "Referer": "https://www.gob.mx/sat/",
-    }
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-        tasks = [client.head(BASE_PDF + p, headers=headers) for p in patrones]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for i, r in enumerate(results):
-        if not isinstance(r, Exception) and r.status_code in (200, 301, 302, 303, 307, 308):
-            return {"url": BASE_PDF + patrones[i]}
+    fname = oficios_map.get(num)
+    if fname:
+        return {"url": BASE_PDF + fname}
 
     return {"url": SAT_PAGE, "fallback": True}
 
+@app.get("/actualizar-oficios")
+async def forzar_actualizacion_oficios():
+    """Fuerza actualización del mapa de oficios desde la página del SAT"""
+    await actualizar_mapa_oficios()
+    return {"ok": True, "oficios_mapeados": len(oficios_map)}
