@@ -89,6 +89,8 @@ body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;min-height:100vh;
 .lbtn-sat:hover{background:rgba(200,16,46,.28)}
 .lbtn-dof{background:rgba(0,48,130,.18);border-color:rgba(55,138,221,.28);color:#7ac4ff}
 .lbtn-dof:hover{background:rgba(0,48,130,.35)}
+.lbtn-anexo{background:rgba(255,140,0,.12);border-color:rgba(255,140,0,.3);color:#ffc060}
+.lbtn-anexo:hover{background:rgba(255,140,0,.28)}
 .no-stage{font-size:10px;color:rgba(160,130,80,.28);font-style:italic;padding:2px 0}
 .stg-presuncion .stage-head{background:rgba(239,159,39,.08)}.stg-presuncion .sdot{background:#f5c46a}.stg-presuncion .slabel{color:#f5c46a}
 .stg-desvirtuaron .stage-head{background:rgba(29,158,117,.08)}.stg-desvirtuaron .sdot{background:#52c99a}.stg-desvirtuaron .slabel{color:#52c99a}
@@ -249,7 +251,20 @@ async function abrirOficio(num,btn){
   try{
     var r=await fetch(LISTANEGRA_API+"/oficio/"+num);
     var d=await r.json();
-    if(btn){btn.disabled=false;btn.innerHTML="&#128196; Oficio PDF<span class='ldate'>"+ldate+"</span>";}
+    if(btn){
+      btn.disabled=false;
+      btn.innerHTML="&#128196; Oficio PDF<span class='ldate'>"+ldate+"</span>";
+      // Si hay anexo y aún no se mostró, insertar botón Anexo al lado
+      if(d.anexo_url && !btn.parentNode.querySelector(".lbtn-anexo")){
+        var aBtn=document.createElement("a");
+        aBtn.className="lbtn lbtn-anexo";
+        aBtn.href=d.anexo_url;
+        aBtn.target="_blank";
+        aBtn.rel="noopener";
+        aBtn.innerHTML="&#128203; Anexo PDF<span class='ldate'>"+ldate+"</span>";
+        btn.insertAdjacentElement("afterend",aBtn);
+      }
+    }
     window.open(d.url,"_blank","noopener");
   }catch(e){
     if(btn){btn.disabled=false;btn.innerHTML="&#128196; Oficio PDF<span class='ldate'>"+ldate+"</span>";}
@@ -363,4 +378,3 @@ fetch("https://listanegra-api-production.up.railway.app/status").then(function(r
 </script>
 </body>
 </html>
-
